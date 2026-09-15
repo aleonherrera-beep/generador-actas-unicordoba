@@ -1,1 +1,180 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Generador de Actas - Universidad de Córdoba</title>
+  <style>
+    :root{font-family:Inter,system-ui,Segoe UI,Arial,sans-serif;background:#f5f7f6;color:#17221b}
+    *{box-sizing:border-box} body{margin:0} header{background:#fff;border-bottom:1px solid #dfe6e1;padding:20px 24px;position:sticky;top:0;z-index:5}
+    header h1{font-size:20px;margin:0} header p{margin:5px 0 0;color:#5d6c62;font-size:13px}
+    main{max-width:1050px;margin:28px auto;padding:0 18px 60px}.card{background:#fff;border:1px solid #dfe6e1;border-radius:16px;padding:22px;margin:16px 0;box-shadow:0 4px 18px rgba(20,40,28,.04)}
+    h2{font-size:18px;margin:0 0 16px}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.full{grid-column:1/-1}
+    label{display:block;font-size:13px;font-weight:700;margin-bottom:6px} input,select,textarea{width:100%;border:1px solid #cdd8d0;border-radius:9px;padding:10px 11px;background:#fff;font:inherit}
+    textarea{min-height:160px;resize:vertical}.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.btn{border:0;border-radius:10px;padding:11px 16px;font-weight:700;cursor:pointer;background:#1f6f43;color:#fff}.btn.secondary{background:#eef4f0;color:#244b34;border:1px solid #cbd9d0}.btn:disabled{opacity:.45;cursor:not-allowed}
+    .status{font-size:13px;color:#5e6d63}.pill{display:inline-block;padding:4px 8px;border-radius:999px;background:#eef4f0;font-size:12px}.hidden{display:none}
+    table{width:100%;border-collapse:collapse;font-size:13px}th,td{border-bottom:1px solid #e4e9e5;text-align:left;padding:9px 6px;vertical-align:middle}th{color:#526158}.attendance-select{min-width:130px}
+    ol{margin-top:8px}.danger{color:#9f2b2b}.ok{color:#1f6f43}.preview{white-space:pre-wrap;background:#f8faf9;border:1px solid #dfe6e1;border-radius:10px;padding:14px;max-height:480px;overflow:auto}
+    @media(max-width:720px){.grid{grid-template-columns:1fr}.full{grid-column:auto}}
+  </style>
+</head>
+<body>
+<header><h1>Generador institucional de actas</h1><p>Universidad de Córdoba · Citación → asistencia → audio/transcripción → acta Word</p></header>
+<main>
+  <section class="card">
+    <h2>0. Servidor de procesamiento</h2>
+    <div class="row">
+      <input id="backendUrl" placeholder="https://xxxx.trycloudflare.com" style="flex:1;min-width:280px" />
+      <button class="btn secondary" onclick="saveBackend()">Guardar y comprobar</button>
+      <span id="health" class="status"></span>
+    </div>
+  </section>
 
+  <section class="card">
+    <h2>1. Subir citación</h2>
+    <div class="row">
+      <input id="citationFile" type="file" accept=".pdf,.docx,.txt" style="flex:1" />
+      <button class="btn" onclick="parseCitation()">Extraer información</button>
+    </div>
+    <p id="citationStatus" class="status"></p>
+    <div id="meetingFields" class="grid hidden">
+      <div><label>N.º de acta</label><input id="actNumber" placeholder="03"></div>
+      <div><label>Comité</label><input id="committee"></div>
+      <div><label>Fecha</label><input id="date"></div>
+      <div><label>Hora de inicio</label><input id="time"></div>
+      <div class="full"><label>Lugar</label><input id="place"></div>
+      <div class="full"><label>Orden del día extraído</label><ol id="agendaList"></ol></div>
+    </div>
+  </section>
+
+  <section id="attendanceCard" class="card hidden">
+    <h2>2. Confirmar asistencia</h2>
+    <p class="status">La citación propone los nombres. Tú decides manualmente quién asistió, quién no asistió y quién presentó excusa.</p>
+    <table><thead><tr><th>Nombre</th><th>Cargo / dependencia</th><th>Tipo</th><th>Estado</th></tr></thead><tbody id="attendanceBody"></tbody></table>
+    <div class="row" style="margin-top:14px"><button class="btn secondary" onclick="addPerson()">+ Agregar participante no citado</button></div>
+  </section>
+
+  <section id="sourceCard" class="card hidden">
+    <h2>3. Audio o transcripción</h2>
+    <div class="row" style="margin-bottom:12px">
+      <label style="margin:0"><input type="radio" name="source" value="audio" checked onchange="toggleSource()" style="width:auto"> Tengo el audio</label>
+      <label style="margin:0"><input type="radio" name="source" value="text" onchange="toggleSource()" style="width:auto"> Ya tengo la transcripción</label>
+    </div>
+    <div id="audioBox">
+      <div class="grid"><div class="full"><label>Audio</label><input id="audioFile" type="file" accept="audio/*,.mp4,.m4a,.aac,.ogg,.flac"></div><div><label>Modelo Whisper</label><select id="whisperModel"><option value="small">small (recomendado para empezar)</option><option value="medium">medium (mejor calidad, más lento)</option></select></div></div>
+      <button class="btn" style="margin-top:12px" onclick="transcribeAudio()">Transcribir audio</button>
+    </div>
+    <div id="textBox" class="hidden">
+      <label>Archivo de transcripción</label><input id="transcriptFile" type="file" accept=".txt,.docx,.pdf">
+      <button class="btn" style="margin-top:12px" onclick="readTranscript()">Cargar transcripción</button>
+    </div>
+    <p id="transcriptStatus" class="status"></p>
+    <div id="transcriptEditor" class="hidden"><label>Transcripción (editable antes de redactar)</label><textarea id="transcript"></textarea></div>
+  </section>
+
+  <section id="draftCard" class="card hidden">
+    <h2>4. Generar borrador del acta</h2>
+    <p class="status">El modelo redactará una versión institucional siguiendo el estilo del acta de referencia. Los datos deben salir de la transcripción y la citación.</p>
+    <button class="btn" onclick="generateDraft()">Redactar acta</button>
+    <p id="draftStatus" class="status"></p>
+    <div id="draftPreview" class="hidden">
+      <label>Desarrollo de la sesión</label><textarea id="development" style="min-height:360px"></textarea>
+      <div class="grid">
+        <div class="full"><label>Aprobación del acta anterior</label><input id="approvalPrevious"></div>
+        <div class="full"><label>Proposiciones y varios</label><textarea id="varios"></textarea></div>
+      </div>
+      <details style="margin-top:12px"><summary>Ver JSON estructurado (compromisos, decisiones y correspondencia)</summary><textarea id="draftJson" style="min-height:300px;font-family:ui-monospace,Consolas,monospace"></textarea></details>
+      <button class="btn" style="margin-top:16px" onclick="downloadDocx()">Generar y descargar Word</button>
+    </div>
+  </section>
+</main>
+<script>
+let parsedMeeting=null; let people=[]; let draft=null;
+const $=id=>document.getElementById(id);
+function base(){return $('backendUrl').value.trim().replace(/\/$/,'')}
+function saveBackend(){localStorage.setItem('actasBackend',base());checkHealth()}
+async function checkHealth(){
+  $('health').textContent='Comprobando…'; $('health').className='status';
+  try{let r=await fetch(base()+'/health',{cache:'no-store'});if(!r.ok)throw new Error('HTTP '+r.status);let j=await r.json();$('health').textContent='✓ Conectado'+(j.model_loaded?' · modelo listo':'');$('health').className='status ok'}catch(e){$('health').textContent='No se pudo conectar';$('health').className='status danger'}
+}
+window.addEventListener('load',()=>{$('backendUrl').value=localStorage.getItem('actasBackend')||'';if(base())checkHealth()})
+
+async function parseCitation(){
+ const f=$('citationFile').files[0]; if(!f)return alert('Selecciona la citación.');
+ $('citationStatus').textContent='Leyendo citación…';
+ let fd=new FormData();fd.append('file',f);
+ try{let r=await fetch(base()+'/parse-citation',{method:'POST',body:fd});if(!r.ok)throw new Error(await r.text());parsedMeeting=await r.json();
+   $('committee').value=parsedMeeting.committee||'';$('date').value=parsedMeeting.date||'';$('time').value=parsedMeeting.time||'';$('place').value=parsedMeeting.place||'';
+   $('agendaList').innerHTML='';(parsedMeeting.agenda||[]).forEach(x=>{let li=document.createElement('li');li.textContent=x;$('agendaList').appendChild(li)});
+   people=(parsedMeeting.people||[]).map(p=>({...p,status:p.category==='Miembro'?'Asistió':'Asistió'}));renderAttendance();
+   $('meetingFields').classList.remove('hidden');$('attendanceCard').classList.remove('hidden');$('sourceCard').classList.remove('hidden');
+   $('citationStatus').textContent=`✓ Extraídos ${people.length} citados/invitados y ${(parsedMeeting.agenda||[]).length} puntos del orden del día.`;
+ }catch(e){$('citationStatus').textContent='Error: '+e.message}
+}
+function renderAttendance(){
+ $('attendanceBody').innerHTML='';people.forEach((p,i)=>{let tr=document.createElement('tr');tr.innerHTML=`<td><input value="${esc(p.name||'')}" oninput="people[${i}].name=this.value"></td><td><input value="${esc(p.role||'')}" oninput="people[${i}].role=this.value"></td><td><select onchange="people[${i}].category=this.value"><option ${p.category==='Miembro'?'selected':''}>Miembro</option><option ${p.category!=='Miembro'?'selected':''}>Invitado</option></select></td><td><select class="attendance-select" onchange="people[${i}].status=this.value"><option ${p.status==='Asistió'?'selected':''}>Asistió</option><option ${p.status==='No asistió'?'selected':''}>No asistió</option><option ${p.status==='Excusa'?'selected':''}>Excusa</option></select></td>`;$('attendanceBody').appendChild(tr)})
+}
+function addPerson(){people.push({name:'',role:'',category:'Invitado',status:'Asistió'});renderAttendance()}
+function esc(s){return String(s).replaceAll('&','&amp;').replaceAll('"','&quot;').replaceAll('<','&lt;')}
+function toggleSource(){let v=document.querySelector('input[name="source"]:checked').value;$('audioBox').classList.toggle('hidden',v!=='audio');$('textBox').classList.toggle('hidden',v!=='text')}
+async function transcribeAudio(){let f=$('audioFile').files[0];if(!f)return alert('Selecciona un audio.');$('transcriptStatus').textContent='Transcribiendo… En audios largos puede tardar bastante.';let fd=new FormData();fd.append('file',f);fd.append('model',$('whisperModel').value);try{let r=await fetch(base()+'/transcribe',{method:'POST',body:fd});if(!r.ok)throw new Error(await r.text());let j=await r.json();$('transcript').value=j.transcript;$('transcriptEditor').classList.remove('hidden');$('draftCard').classList.remove('hidden');$('transcriptStatus').textContent='✓ Transcripción terminada.'}catch(e){$('transcriptStatus').textContent='Error: '+e.message}}
+async function readTranscript(){let f=$('transcriptFile').files[0];if(!f)return alert('Selecciona la transcripción.');$('transcriptStatus').textContent='Leyendo archivo…';let fd=new FormData();fd.append('file',f);try{let r=await fetch(base()+'/read-transcript',{method:'POST',body:fd});if(!r.ok)throw new Error(await r.text());let j=await r.json();$('transcript').value=j.transcript;$('transcriptEditor').classList.remove('hidden');$('draftCard').classList.remove('hidden');$('transcriptStatus').textContent='✓ Transcripción cargada.'}catch(e){$('transcriptStatus').textContent='Error: '+e.message}}
+function meetingPayload(){
+  const agenda=[...$('agendaList').querySelectorAll('li')].map(li=>li.textContent.trim()).filter(Boolean);
+  return {...(parsedMeeting||{}),act_number:$('actNumber').value,committee:$('committee').value,date:$('date').value,time:$('time').value,start_time:$('time').value,place:$('place').value,agenda};
+}
+function sleep(ms){return new Promise(resolve=>setTimeout(resolve,ms))}
+async function responseError(r){
+  let text='';
+  try{text=await r.text()}catch(_){}
+  try{const j=JSON.parse(text);return j.detail||j.error||text||('HTTP '+r.status)}catch(_){return text||('HTTP '+r.status)}
+}
+async function generateDraft(){
+  const text=$('transcript').value.trim();
+  if(!text)return alert('No hay transcripción.');
+  if(!base())return alert('Primero conecta el servidor de procesamiento.');
+  $('draftStatus').textContent='Enviando la reunión al servidor…';
+  $('draftStatus').className='status';
+  try{
+    // Se inicia un trabajo corto y luego se consulta su estado. Esto evita que
+    // Cloudflare cierre una petición larga mientras la IA redacta el acta.
+    let r=await fetch(base()+'/draft-start',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({meeting:meetingPayload(),attendance:people,transcript:text})
+    });
+    if(!r.ok)throw new Error(await responseError(r));
+    const started=await r.json();
+    const jobId=started.job_id;
+    if(!jobId)throw new Error('El servidor no devolvió un identificador de trabajo.');
+
+    const startedAt=Date.now();
+    while(true){
+      await sleep(3000);
+      let s=await fetch(base()+'/draft-status/'+encodeURIComponent(jobId),{cache:'no-store'});
+      if(!s.ok)throw new Error(await responseError(s));
+      let j=await s.json();
+      const elapsed=Math.max(1,Math.round((Date.now()-startedAt)/1000));
+      if(j.status==='done'){
+        draft=j.result||{};
+        $('development').value=draft.development||'';
+        $('approvalPrevious').value=draft.approval_previous||'N.A.';
+        $('varios').value=draft.varios||'N.A.';
+        $('draftJson').value=JSON.stringify(draft,null,2);
+        $('draftPreview').classList.remove('hidden');
+        $('draftStatus').textContent='✓ Borrador generado. Revísalo antes de descargar.';
+        $('draftStatus').className='status ok';
+        return;
+      }
+      if(j.status==='error')throw new Error(j.error||'La redacción falló en el servidor.');
+      $('draftStatus').textContent=`Redactando el acta… ${elapsed} s. Puedes dejar esta pestaña abierta.`;
+      if(Date.now()-startedAt>30*60*1000)throw new Error('La redacción superó 30 minutos.');
+    }
+  }catch(e){
+    $('draftStatus').textContent='Error: '+(e?.message||String(e));
+    $('draftStatus').className='status danger';
+  }
+}
+async function downloadDocx(){try{draft=JSON.parse($('draftJson').value);draft.development=$('development').value;draft.approval_previous=$('approvalPrevious').value;draft.varios=$('varios').value;let r=await fetch(base()+'/docx',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({meeting:meetingPayload(),attendance:people,draft})});if(!r.ok)throw new Error(await r.text());let blob=await r.blob(),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='Acta_'+($('actNumber').value||'Nueva')+'.docx';a.click();URL.revokeObjectURL(url)}catch(e){alert('No se pudo generar Word: '+e.message)}}
+</script>
+</body></html>
