@@ -27,7 +27,7 @@ STYLE_PATH = BASE_DIR / "style_reference.txt"
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 logger = logging.getLogger("actas")
 
-app = FastAPI(title="Generador de Actas Unicórdoba", version="0.3.0")
+app = FastAPI(title="Generador de Actas Unicórdoba", version="0.4.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -321,45 +321,131 @@ def llm_generate(messages: List[Dict[str, str]], max_new_tokens: int = 1400) -> 
     generated = outputs[0][inputs["input_ids"].shape[1]:]
     return tok.decode(generated, skip_special_tokens=True).strip()
 
-def split_text(text: str, max_chars: int = 9000) -> List[str]:
+
+def split_text_smart(text: str, max_chars: int = 5200, overlap_chars: int = 350) -> List[str]:
+    """Divide transcripciones largas sin cortar demasiado el contexto.
+
+    Se intenta cortar por saltos de línea/párrafos. Se conserva un pequeño
+    solapamiento entre bloques para no perder una intervención que quede en el borde.
+    """
+    text = re.sub(r"\r\n?", "\n", text).strip()
     if len(text) <= max_chars:
         return [text]
-    chunks = []
-    current = []
-    size = 0
-    for p in re.split(r"\n+", text):
-        if size + len(p) > max_chars and current:
-            chunks.append("\n".join(current))
-            current, size = [], 0
-        current.append(p)
-        size += len(p) + 1
+
+    units = [u.strip() for u in re.split(r"\n+", text) if u.strip()]
+    chunks: List[str] = []
+    current: List[str] = []
+    current_len = 0
+
+    for unit in units:
+        # Si una unidad aislada es enorme, se corta por frases aproximadas.
+        if len(unit) > max_chars:
+            sentences = re.split(r"(?<=[\.\?\!])\s+", unit)
+        else:
+            sentences = [unit]
+
+        for part in sentences:
+            part = part.strip()
+            if not part:
+                continue
+            projected = current_len + len(part) + (1 if current else 0)
+            if projected > max_chars and current:
+                chunk = "\n".join(current).strip()
+                chunks.append(chunk)
+
+                # Reutiliza el final del bloque anterior como contexto.
+                tail = chunk[-overlap_chars:].strip()
+                current = [tail] if tail else []
+                current_len = len(tail)
+
+            current.append(part)
+            current_len += len(part) + 1
+
     if current:
-        chunks.append("\n".join(current))
-    return chunks
+        chunks.append("\n".join(current).strip())
+
+    return [c for c in chunks if c]
 
 
-def summarize_transcript(transcript: str, meeting: Dict[str, Any]) -> str:
-    style = STYLE_PATH.read_text(encoding="utf-8")
-    chunks = split_text(transcript, 6000)
-    notes = []
-    agenda = "\n".join(f"- {x}" for x in meeting.get("agenda", []))
-    for idx, chunk in enumerate(chunks, 1):
-        prompt = f"""
-Eres secretario técnico de un comité universitario. Extrae NOTAS FÁCTICAS de este fragmento de transcripción.
-No redactes todavía el acta final. No inventes. Conserva nombres, cifras, fechas, decisiones, responsables, solicitudes, recomendaciones y asuntos discutidos.
-Relaciona, cuando sea posible, cada nota con el orden del día.
+def _agenda_text(meeting: Dict[str, Any]) -> str:
+    agenda = meeting.get("agenda", []) or []
+    if not agenda:
+        return "Sin orden del día explícito."
+    return "\n".join(f"{i+1}. {x}" for i, x in enumerate(agenda))
+
+
+def extract_chunk_notes(chunk: str, meeting: Dict[str, Any], idx: int, total: int) -> str:
+    """Extrae hechos de un bloque con una salida compacta para mantener velocidad."""
+    agenda = _agenda_text(meeting)
+    prompt = f"""
+Analiza este fragmento de una reunión universitaria y produce NOTAS FÁCTICAS COMPACTAS.
+No redactes el acta final. No inventes ni completes vacíos.
+
+Debes conservar, solo si aparecen:
+- quién intervino y qué informó, propuso, explicó, solicitó u observó;
+- cifras, fechas, nombres de programas, eventos, normas y lugares;
+- decisiones, aprobaciones, recomendaciones y desacuerdos;
+- compromisos, responsables y fechas;
+- correspondencia leída y decisión adoptada;
+- asuntos de proposiciones y varios.
+
+Relaciona cada nota con el punto del orden del día cuando sea evidente.
+Evita repeticiones, saludos, muletillas y conversación sin efecto en el acta.
+Usa viñetas breves pero suficientemente específicas.
 
 ORDEN DEL DÍA:
 {agenda}
 
-FRAGMENTO {idx}/{len(chunks)}:
+FRAGMENTO {idx}/{total}:
 {chunk}
 """
-        notes.append(llm_generate([
-            {"role": "system", "content": "Extraes información fiel de reuniones académicas. Nunca inventas hechos."},
+    return llm_generate([
+        {"role": "system", "content": "Extraes hechos verificables de reuniones académicas. Eres fiel, compacto y nunca inventas."},
+        {"role": "user", "content": prompt},
+    ], max_new_tokens=500)
+
+
+def consolidate_notes(notes: List[str], meeting: Dict[str, Any], progress_cb=None) -> str:
+    """Consolida notas cuando una reunión es muy extensa.
+
+    Para reuniones cortas se evita este paso. Para reuniones largas se agrupan
+    varias salidas para que la redacción final no exceda el contexto del modelo.
+    """
+    joined = "\n\n".join(notes)
+    if len(joined) <= 28000:
+        return joined
+
+    agenda = _agenda_text(meeting)
+    batches = [notes[i:i+5] for i in range(0, len(notes), 5)]
+    compacted: List[str] = []
+
+    for i, batch in enumerate(batches, 1):
+        if progress_cb:
+            progress_cb(
+                stage="consolidating",
+                message=f"Consolidando notas {i} de {len(batches)}…",
+                current=i,
+                total=len(batches),
+            )
+        prompt = f"""
+Consolida estas notas de una reunión universitaria SIN perder hechos sustantivos.
+Elimina duplicados, pero conserva nombres, cifras, fechas, decisiones, recomendaciones,
+compromisos, responsables, correspondencia y argumentos relevantes.
+Organiza las notas según el orden del día cuando sea posible.
+No redactes todavía el acta final y no inventes.
+
+ORDEN DEL DÍA:
+{agenda}
+
+NOTAS:
+{chr(10).join(batch)}
+"""
+        compacted.append(llm_generate([
+            {"role": "system", "content": "Consolidas información factual de reuniones sin inventar ni borrar decisiones relevantes."},
             {"role": "user", "content": prompt},
-        ], max_new_tokens=1200))
-    return "\n\n".join(notes)
+        ], max_new_tokens=750))
+
+    return "\n\n".join(compacted)
 
 
 def extract_json(text: str) -> Dict[str, Any]:
@@ -373,11 +459,56 @@ def extract_json(text: str) -> Dict[str, Any]:
     return json.loads(text)
 
 
-def draft_minutes(transcript: str, meeting: Dict[str, Any], attendance: List[Dict[str, Any]]) -> Dict[str, Any]:
+def draft_minutes(
+    transcript: str,
+    meeting: Dict[str, Any],
+    attendance: List[Dict[str, Any]],
+    progress_cb=None,
+) -> Dict[str, Any]:
+    """Pipeline v0.4 optimizado para reuniones largas.
+
+    1) divide la transcripción;
+    2) extrae hechos por bloque;
+    3) consolida si hace falta;
+    4) redacta una sola vez el acta institucional.
+    """
+    chunks = split_text_smart(transcript, max_chars=5200, overlap_chars=350)
+    total = len(chunks)
+    notes: List[str] = []
+
+    for idx, chunk in enumerate(chunks, 1):
+        if progress_cb:
+            progress_cb(
+                stage="extracting",
+                message=f"Analizando bloque {idx} de {total}…",
+                current=idx,
+                total=total,
+            )
+        notes.append(extract_chunk_notes(chunk, meeting, idx, total))
+
+    if progress_cb:
+        progress_cb(
+            stage="consolidating",
+            message="Organizando la información extraída…",
+            current=0,
+            total=max(1, (len(notes)+4)//5),
+        )
+    notes_text = consolidate_notes(notes, meeting, progress_cb=progress_cb)
+
+    if progress_cb:
+        progress_cb(
+            stage="drafting",
+            message="Redactando el acta institucional…",
+            current=1,
+            total=1,
+        )
+
     style = STYLE_PATH.read_text(encoding="utf-8")
-    notes = summarize_transcript(transcript, meeting)
-    agenda = "\n".join(f"{i+1}. {x}" for i, x in enumerate(meeting.get("agenda", [])))
-    att = "\n".join(f"- {p.get('name')}: {p.get('status')} ({p.get('role','')})" for p in attendance)
+    agenda = _agenda_text(meeting)
+    att = "\n".join(
+        f"- {p.get('name')}: {p.get('status')} ({p.get('role','')})"
+        for p in attendance
+    )
 
     schema = {
         "development": "texto narrativo completo del desarrollo de la sesión, con subtítulos según temas",
@@ -392,10 +523,10 @@ def draft_minutes(transcript: str, meeting: Dict[str, Any], attendance: List[Dic
     }
 
     prompt = f"""
-Redacta el contenido de un acta institucional universitaria a partir EXCLUSIVAMENTE de las notas fieles de una reunión.
-Sigue el estilo descrito y devuelve SOLO JSON válido, sin markdown.
+Redacta el contenido de un acta institucional universitaria a partir EXCLUSIVAMENTE
+de las notas factuales extraídas de la reunión. Devuelve SOLO JSON válido, sin markdown.
 
-ESTILO:
+ESTILO DE REFERENCIA:
 {style}
 
 DATOS DE LA REUNIÓN:
@@ -407,29 +538,32 @@ ASISTENCIA CONFIRMADA MANUALMENTE:
 ORDEN DEL DÍA:
 {agenda}
 
-NOTAS EXTRAÍDAS DE LA TRANSCRIPCIÓN:
-{notes}
+NOTAS FÁCTICAS CONSOLIDADAS:
+{notes_text}
 
-REGLAS:
-- No inventes decisiones, responsables, fechas, cifras ni intervenciones.
+REGLAS OBLIGATORIAS:
+- No inventes decisiones, responsables, fechas, cifras, nombres ni intervenciones.
 - Redacta en tercera persona y tono institucional.
-- El desarrollo debe ser sustancial, no un resumen corto; debe conservar el contenido importante de cada tema.
-- Organiza el desarrollo siguiendo el orden del día y usando subtítulos claros.
-- Si lectura de correspondencia contiene solicitudes y decisiones, sepáralas en el arreglo correspondence.
-- Si no hay evidencia de un campo, usa "N.A." o arreglo vacío.
-- No incluyas firmas inventadas.
+- El desarrollo debe ser sustancial y conservar los asuntos importantes, no ser un resumen mínimo.
+- Organiza el desarrollo siguiendo el orden del día y usa subtítulos claros.
+- Cuando varias personas intervengan sobre un mismo asunto, integra sus aportes de forma narrativa sin perder diferencias relevantes.
+- Conserva recomendaciones, observaciones, argumentos, decisiones y resultados de cada discusión.
+- Si lectura de correspondencia contiene solicitudes y decisiones, sepáralas en correspondence.
+- Si no hay evidencia de un campo, usa "N.A." o un arreglo vacío.
+- No inventes firmas.
+- No repitas el orden del día como si fuera desarrollo si no hubo discusión.
 - JSON objetivo con esta forma exacta:
 {json.dumps(schema, ensure_ascii=False, indent=2)}
 """
     raw = llm_generate([
-        {"role": "system", "content": "Redactas actas universitarias fieles, extensas, objetivas y estructuradas. Respondes en JSON válido."},
+        {"role": "system", "content": "Redactas actas universitarias fieles, completas, objetivas y estructuradas. Respondes únicamente JSON válido."},
         {"role": "user", "content": prompt},
-    ], max_new_tokens=2000)
+    ], max_new_tokens=2200)
+
     try:
-        return extract_json(raw)
+        result = extract_json(raw)
     except Exception:
-        # Fallback: conserva el texto como desarrollo en vez de fallar por formato JSON.
-        return {
+        result = {
             "development": raw,
             "approval_previous": "N.A.",
             "previous_commitments": [],
@@ -440,6 +574,14 @@ REGLAS:
             "end_time": "",
             "next_session": {"date": "", "time": "", "place": ""},
         }
+
+    # Metadatos internos útiles para la interfaz; no afectan al Word.
+    result["_processing"] = {
+        "chunks": total,
+        "transcript_chars": len(transcript),
+        "notes_chars": len(notes_text),
+    }
+    return result
 
 
 # ---------------------------
@@ -618,7 +760,7 @@ def health():
     return {
         "ok": True,
         "service": "Generador de Actas Unicórdoba",
-        "version": "0.3.0",
+        "version": "0.4.0",
         "gpu": bool(torch.cuda.is_available()),
         "model_loaded": _MODEL is not None,
     }
@@ -701,14 +843,66 @@ def _set_job(job_id: str, **values):
         job = _DRAFT_JOBS.setdefault(job_id, {})
         job.update(values)
 
+def _progress_for(stage: str, current: int, total: int) -> int:
+    """Convierte etapas del pipeline en un porcentaje aproximado útil."""
+    total = max(1, total)
+    frac = max(0.0, min(1.0, current / total))
+    if stage == "queued":
+        return 2
+    if stage == "extracting":
+        return int(5 + frac * 70)      # 5..75
+    if stage == "consolidating":
+        return int(75 + frac * 10)     # 75..85
+    if stage == "drafting":
+        return 90
+    if stage == "done":
+        return 100
+    return 1
+
 def _run_draft_job(job_id: str, transcript: str, meeting: Dict[str, Any], attendance: List[Dict[str, Any]]):
+    import time
+    started = time.time()
+
+    def progress_cb(stage: str, message: str, current: int = 0, total: int = 1):
+        _set_job(
+            job_id,
+            status="running",
+            stage=stage,
+            message=message,
+            current=current,
+            total=total,
+            percent=_progress_for(stage, current, total),
+            elapsed_seconds=int(time.time() - started),
+        )
+
     try:
-        _set_job(job_id, status="running", message="Redactando acta…")
-        result = draft_minutes(transcript, meeting, attendance)
-        _set_job(job_id, status="done", result=result, message="Borrador listo")
+        progress_cb("queued", "Preparando la reunión…", 0, 1)
+        result = draft_minutes(
+            transcript,
+            meeting,
+            attendance,
+            progress_cb=progress_cb,
+        )
+        _set_job(
+            job_id,
+            status="done",
+            stage="done",
+            percent=100,
+            result=result,
+            message="Borrador listo",
+            elapsed_seconds=int(time.time() - started),
+        )
     except Exception as e:
         logger.error("Fallo en trabajo de redacción %s\n%s", job_id, traceback.format_exc())
-        _set_job(job_id, status="error", error=f"{type(e).__name__}: {e}", message="Falló la redacción")
+        _set_job(
+            job_id,
+            status="error",
+            stage="error",
+            percent=0,
+            error=f"{type(e).__name__}: {e}",
+            message="Falló la redacción",
+            elapsed_seconds=int(time.time() - started),
+        )
 
 @app.post("/draft-start")
 async def api_draft_start(payload: Dict[str, Any]):
@@ -718,7 +912,16 @@ async def api_draft_start(payload: Dict[str, Any]):
     meeting = payload.get("meeting") or {}
     attendance = payload.get("attendance") or []
     job_id = uuid.uuid4().hex
-    _set_job(job_id, status="queued", message="Trabajo recibido")
+    _set_job(
+        job_id,
+        status="queued",
+        stage="queued",
+        percent=2,
+        current=0,
+        total=1,
+        message="Trabajo recibido",
+        transcript_chars=len(transcript),
+    )
     loop = asyncio.get_running_loop()
     loop.run_in_executor(None, _run_draft_job, job_id, transcript, meeting, attendance)
     return {"ok": True, "job_id": job_id, "status": "queued"}
@@ -729,7 +932,19 @@ def api_draft_status(job_id: str):
         job = dict(_DRAFT_JOBS.get(job_id) or {})
     if not job:
         raise HTTPException(404, "Trabajo no encontrado.")
-    payload = {"ok": True, "job_id": job_id, "status": job.get("status"), "message": job.get("message", "")}
+
+    payload = {
+        "ok": True,
+        "job_id": job_id,
+        "status": job.get("status"),
+        "stage": job.get("stage", ""),
+        "message": job.get("message", ""),
+        "percent": job.get("percent", 0),
+        "current": job.get("current", 0),
+        "total": job.get("total", 1),
+        "elapsed_seconds": job.get("elapsed_seconds", 0),
+        "transcript_chars": job.get("transcript_chars", 0),
+    }
     if job.get("status") == "done":
         payload["result"] = job.get("result")
     elif job.get("status") == "error":
