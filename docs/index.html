@@ -77,6 +77,15 @@
     <p class="status">El modelo redactará una versión institucional siguiendo el estilo del acta de referencia. Los datos deben salir de la transcripción y la citación.</p>
     <button class="btn" onclick="generateDraft()">Redactar acta</button>
     <p id="draftStatus" class="status"></p>
+    <div id="draftProgressWrap" class="hidden" style="margin:10px 0 16px">
+      <div style="height:12px;background:#e8eee9;border-radius:999px;overflow:hidden">
+        <div id="draftProgressBar" style="height:100%;width:0%;background:#1f6f43;transition:width .35s ease"></div>
+      </div>
+      <div class="row" style="justify-content:space-between;margin-top:6px">
+        <span id="draftProgressText" class="status">0%</span>
+        <span id="draftProgressDetail" class="status"></span>
+      </div>
+    </div>
     <div id="draftPreview" class="hidden">
       <label>Desarrollo de la sesión</label><textarea id="development" style="min-height:360px"></textarea>
       <div class="grid">
@@ -133,28 +142,51 @@ async function generateDraft(){
   const text=$('transcript').value.trim();
   if(!text)return alert('No hay transcripción.');
   if(!base())return alert('Primero conecta el servidor de procesamiento.');
+
   $('draftStatus').textContent='Enviando la reunión al servidor…';
   $('draftStatus').className='status';
+  $('draftProgressWrap').classList.remove('hidden');
+  $('draftProgressBar').style.width='2%';
+  $('draftProgressText').textContent='2%';
+  $('draftProgressDetail').textContent='Preparando…';
+
   try{
-    // Se inicia un trabajo corto y luego se consulta su estado. Esto evita que
-    // Cloudflare cierre una petición larga mientras la IA redacta el acta.
     let r=await fetch(base()+'/draft-start',{
       method:'POST',
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({meeting:meetingPayload(),attendance:people,transcript:text})
     });
     if(!r.ok)throw new Error(await responseError(r));
+
     const started=await r.json();
     const jobId=started.job_id;
     if(!jobId)throw new Error('El servidor no devolvió un identificador de trabajo.');
 
-    const startedAt=Date.now();
     while(true){
-      await sleep(3000);
+      await sleep(2500);
+
       let s=await fetch(base()+'/draft-status/'+encodeURIComponent(jobId),{cache:'no-store'});
       if(!s.ok)throw new Error(await responseError(s));
       let j=await s.json();
-      const elapsed=Math.max(1,Math.round((Date.now()-startedAt)/1000));
+
+      const pct=Math.max(0,Math.min(100,Number(j.percent||0)));
+      $('draftProgressBar').style.width=pct+'%';
+      $('draftProgressText').textContent=Math.round(pct)+'%';
+
+      let detail='';
+      if(j.stage==='extracting' && j.total){
+        detail=`Bloque ${j.current||0} de ${j.total}`;
+      }else if(j.stage==='consolidating' && j.total){
+        detail=j.current?`Grupo ${j.current} de ${j.total}`:'Organizando notas';
+      }else if(j.stage==='drafting'){
+        detail='Redacción final';
+      }else{
+        detail=j.message||'Procesando';
+      }
+      if(j.elapsed_seconds) detail += ` · ${j.elapsed_seconds} s`;
+      $('draftProgressDetail').textContent=detail;
+      $('draftStatus').textContent=j.message||'Procesando reunión…';
+
       if(j.status==='done'){
         draft=j.result||{};
         $('development').value=draft.development||'';
@@ -164,15 +196,21 @@ async function generateDraft(){
         $('draftPreview').classList.remove('hidden');
         $('draftStatus').textContent='✓ Borrador generado. Revísalo antes de descargar.';
         $('draftStatus').className='status ok';
+        $('draftProgressBar').style.width='100%';
+        $('draftProgressText').textContent='100%';
+        const meta=draft._processing||{};
+        $('draftProgressDetail').textContent=meta.chunks?`${meta.chunks} bloques procesados`:'Completado';
         return;
       }
-      if(j.status==='error')throw new Error(j.error||'La redacción falló en el servidor.');
-      $('draftStatus').textContent=`Redactando el acta… ${elapsed} s. Puedes dejar esta pestaña abierta.`;
-      if(Date.now()-startedAt>30*60*1000)throw new Error('La redacción superó 30 minutos.');
+
+      if(j.status==='error'){
+        throw new Error(j.error||'La redacción falló en el servidor.');
+      }
     }
   }catch(e){
     $('draftStatus').textContent='Error: '+(e?.message||String(e));
     $('draftStatus').className='status danger';
+    $('draftProgressDetail').textContent='Proceso interrumpido';
   }
 }
 async function downloadDocx(){try{draft=JSON.parse($('draftJson').value);draft.development=$('development').value;draft.approval_previous=$('approvalPrevious').value;draft.varios=$('varios').value;let r=await fetch(base()+'/docx',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({meeting:meetingPayload(),attendance:people,draft})});if(!r.ok)throw new Error(await r.text());let blob=await r.blob(),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='Acta_'+($('actNumber').value||'Nueva')+'.docx';a.click();URL.revokeObjectURL(url)}catch(e){alert('No se pudo generar Word: '+e.message)}}
