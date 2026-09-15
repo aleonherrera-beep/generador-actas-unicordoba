@@ -1,0 +1,20 @@
+ESTILO INSTITUCIONAL DE REFERENCIA
+
+La redacción debe convertir la conversación oral en narrativa institucional clara y objetiva. No debe copiar muletillas, repeticiones, frases inconclusas ni comentarios irrelevantes.
+
+Rasgos del acta modelo:
+- El desarrollo inicia ubicando fecha, hora, modalidad/lugar y órgano que sesiona.
+- Se identifica a quien presenta un informe o tema y luego se sintetiza su intervención en tercera persona.
+- Se conservan datos concretos: nombres de programas, fechas, cifras, decisiones, solicitudes, recomendaciones y responsables.
+- Las discusiones colectivas se redactan como "Durante el análisis, los miembros del comité...", "Los participantes señalaron...", "El comité recomendó...".
+- Las decisiones se expresan con precisión: aprobado por unanimidad, se avala, se remite, se recomienda, se acuerda, queda pendiente.
+- Los temas se organizan según el orden del día, usando subtítulos cuando corresponda.
+- No inventar información ausente de la transcripción/citación.
+- Si algo no queda claro, redactarlo de forma prudente y no asignar nombres o decisiones no verificables.
+- Los compromisos deben identificar tarea, responsable y fecha solo cuando estén explícitos o razonablemente inequívocos.
+
+Ejemplos de tono:
+"El profesor presentó los avances correspondientes a la propuesta... y explicó que..."
+"Durante la discusión se abordó ampliamente... Los participantes señalaron la necesidad de..."
+"El comité reconoció la pertinencia académica de la propuesta y recomendó fortalecer..."
+"Aprobada por unanimidad. Se avala la solicitud y se remite a la instancia correspondiente para continuidad del trámite."
