@@ -76,6 +76,7 @@
     <h2>4. Generar borrador del acta</h2>
     <p class="status">El modelo redactará una versión institucional siguiendo el estilo del acta de referencia. Los datos deben salir de la transcripción y la citación.</p>
     <button class="btn" onclick="generateDraft()">Redactar acta</button>
+    <button id="resumeDraftBtn" class="btn secondary hidden" onclick="resumeDraft()">Reanudar proceso</button>
     <p id="draftStatus" class="status"></p>
     <div id="draftProgressWrap" class="hidden" style="margin:10px 0 16px">
       <div style="height:12px;background:#e8eee9;border-radius:999px;overflow:hidden">
@@ -140,7 +141,7 @@ async function responseError(r){
 }
 async function pollDraftJob(jobId){
   localStorage.setItem('unicordoba_draft_job_id', jobId);
-  $('resumeDraftBtn').classList.remove('hidden');
+  if($('resumeDraftBtn')) $('resumeDraftBtn').classList.remove('hidden');
   let consecutiveErrors=0;
 
   while(true){
@@ -185,7 +186,7 @@ async function pollDraftJob(jobId){
         const meta=draft._processing||{};
         $('draftProgressDetail').textContent=meta.chunks?`${meta.chunks} bloques procesados`:'Completado';
         localStorage.removeItem('unicordoba_draft_job_id');
-        $('resumeDraftBtn').classList.add('hidden');
+        if($('resumeDraftBtn')) $('resumeDraftBtn').classList.add('hidden');
         return;
       }
 
@@ -261,7 +262,7 @@ async function resumeDraft(){
 
 window.addEventListener('load',()=>{
   const pending=localStorage.getItem('unicordoba_draft_job_id');
-  if(pending && $('resumeDraftBtn')) $('resumeDraftBtn').classList.remove('hidden');
+  if(pending && $('resumeDraftBtn')) if($('resumeDraftBtn')) $('resumeDraftBtn').classList.remove('hidden');
 });
 
 async function downloadDocx(){try{draft=JSON.parse($('draftJson').value);draft.development=$('development').value;draft.approval_previous=$('approvalPrevious').value;draft.varios=$('varios').value;let r=await fetch(base()+'/docx',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({meeting:meetingPayload(),attendance:people,draft})});if(!r.ok)throw new Error(await r.text());let blob=await r.blob(),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='Acta_'+($('actNumber').value||'Nueva')+'.docx';a.click();URL.revokeObjectURL(url)}catch(e){alert('No se pudo generar Word: '+e.message)}}
