@@ -138,6 +138,79 @@ async function responseError(r){
   try{text=await r.text()}catch(_){}
   try{const j=JSON.parse(text);return j.detail||j.error||text||('HTTP '+r.status)}catch(_){return text||('HTTP '+r.status)}
 }
+async function pollDraftJob(jobId){
+  localStorage.setItem('unicordoba_draft_job_id', jobId);
+  $('resumeDraftBtn').classList.remove('hidden');
+  let consecutiveErrors=0;
+
+  while(true){
+    await sleep(2500);
+    try{
+      let s=await fetch(base()+'/draft-status/'+encodeURIComponent(jobId),{cache:'no-store'});
+      if(!s.ok)throw new Error(await responseError(s));
+      let j=await s.json();
+      consecutiveErrors=0;
+
+      const pct=Math.max(0,Math.min(100,Number(j.percent||0)));
+      $('draftProgressBar').style.width=pct+'%';
+      $('draftProgressText').textContent=Math.round(pct)+'%';
+
+      let detail='';
+      if(j.stage==='extracting' && j.total){
+        detail=`Bloque ${j.current||0} de ${j.total}`;
+      }else if(j.stage==='consolidating' && j.total){
+        detail=j.current?`Grupo ${j.current} de ${j.total}`:'Organizando notas';
+      }else if(j.stage==='drafting'){
+        detail='Redacción final';
+      }else{
+        detail=j.message||'Procesando';
+      }
+      if(j.elapsed_seconds) detail += ` · ${j.elapsed_seconds} s`;
+
+      $('draftProgressDetail').textContent=detail;
+      $('draftStatus').textContent=j.message||'Procesando reunión…';
+      $('draftStatus').className='status';
+
+      if(j.status==='done'){
+        draft=j.result||{};
+        $('development').value=draft.development||'';
+        $('approvalPrevious').value=draft.approval_previous||'N.A.';
+        $('varios').value=draft.varios||'N.A.';
+        $('draftJson').value=JSON.stringify(draft,null,2);
+        $('draftPreview').classList.remove('hidden');
+        $('draftStatus').textContent='✓ Borrador generado. Revísalo antes de descargar.';
+        $('draftStatus').className='status ok';
+        $('draftProgressBar').style.width='100%';
+        $('draftProgressText').textContent='100%';
+        const meta=draft._processing||{};
+        $('draftProgressDetail').textContent=meta.chunks?`${meta.chunks} bloques procesados`:'Completado';
+        localStorage.removeItem('unicordoba_draft_job_id');
+        $('resumeDraftBtn').classList.add('hidden');
+        return;
+      }
+
+      if(j.status==='error'){
+        localStorage.removeItem('unicordoba_draft_job_id');
+        throw new Error(j.error||'La redacción falló en el servidor.');
+      }
+
+    }catch(e){
+      consecutiveErrors++;
+      $('draftStatus').textContent=`Conexión intermitente. Reintentando (${consecutiveErrors}/20)…`;
+      $('draftStatus').className='status danger';
+      $('draftProgressDetail').textContent='El trabajo puede seguir ejecutándose en Colab';
+
+      if(consecutiveErrors>=20){
+        throw new Error(
+          'Se perdió la conexión con el servidor. El proceso puede seguir activo en Colab. '+
+          'Comprueba el servidor y pulsa "Reanudar proceso".'
+        );
+      }
+      await sleep(3000);
+    }
+  }
+}
+
 async function generateDraft(){
   const text=$('transcript').value.trim();
   if(!text)return alert('No hay transcripción.');
@@ -162,57 +235,35 @@ async function generateDraft(){
     const jobId=started.job_id;
     if(!jobId)throw new Error('El servidor no devolvió un identificador de trabajo.');
 
-    while(true){
-      await sleep(2500);
-
-      let s=await fetch(base()+'/draft-status/'+encodeURIComponent(jobId),{cache:'no-store'});
-      if(!s.ok)throw new Error(await responseError(s));
-      let j=await s.json();
-
-      const pct=Math.max(0,Math.min(100,Number(j.percent||0)));
-      $('draftProgressBar').style.width=pct+'%';
-      $('draftProgressText').textContent=Math.round(pct)+'%';
-
-      let detail='';
-      if(j.stage==='extracting' && j.total){
-        detail=`Bloque ${j.current||0} de ${j.total}`;
-      }else if(j.stage==='consolidating' && j.total){
-        detail=j.current?`Grupo ${j.current} de ${j.total}`:'Organizando notas';
-      }else if(j.stage==='drafting'){
-        detail='Redacción final';
-      }else{
-        detail=j.message||'Procesando';
-      }
-      if(j.elapsed_seconds) detail += ` · ${j.elapsed_seconds} s`;
-      $('draftProgressDetail').textContent=detail;
-      $('draftStatus').textContent=j.message||'Procesando reunión…';
-
-      if(j.status==='done'){
-        draft=j.result||{};
-        $('development').value=draft.development||'';
-        $('approvalPrevious').value=draft.approval_previous||'N.A.';
-        $('varios').value=draft.varios||'N.A.';
-        $('draftJson').value=JSON.stringify(draft,null,2);
-        $('draftPreview').classList.remove('hidden');
-        $('draftStatus').textContent='✓ Borrador generado. Revísalo antes de descargar.';
-        $('draftStatus').className='status ok';
-        $('draftProgressBar').style.width='100%';
-        $('draftProgressText').textContent='100%';
-        const meta=draft._processing||{};
-        $('draftProgressDetail').textContent=meta.chunks?`${meta.chunks} bloques procesados`:'Completado';
-        return;
-      }
-
-      if(j.status==='error'){
-        throw new Error(j.error||'La redacción falló en el servidor.');
-      }
-    }
+    await pollDraftJob(jobId);
   }catch(e){
     $('draftStatus').textContent='Error: '+(e?.message||String(e));
     $('draftStatus').className='status danger';
-    $('draftProgressDetail').textContent='Proceso interrumpido';
   }
 }
+
+async function resumeDraft(){
+  const jobId=localStorage.getItem('unicordoba_draft_job_id');
+  if(!jobId)return alert('No hay un proceso pendiente guardado en este navegador.');
+  if(!base())return alert('Primero conecta el servidor de procesamiento.');
+
+  $('draftProgressWrap').classList.remove('hidden');
+  $('draftStatus').textContent='Reanudando seguimiento del proceso…';
+  $('draftStatus').className='status';
+
+  try{
+    await pollDraftJob(jobId);
+  }catch(e){
+    $('draftStatus').textContent='Error: '+(e?.message||String(e));
+    $('draftStatus').className='status danger';
+  }
+}
+
+window.addEventListener('load',()=>{
+  const pending=localStorage.getItem('unicordoba_draft_job_id');
+  if(pending && $('resumeDraftBtn')) $('resumeDraftBtn').classList.remove('hidden');
+});
+
 async function downloadDocx(){try{draft=JSON.parse($('draftJson').value);draft.development=$('development').value;draft.approval_previous=$('approvalPrevious').value;draft.varios=$('varios').value;let r=await fetch(base()+'/docx',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({meeting:meetingPayload(),attendance:people,draft})});if(!r.ok)throw new Error(await r.text());let blob=await r.blob(),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='Acta_'+($('actNumber').value||'Nueva')+'.docx';a.click();URL.revokeObjectURL(url)}catch(e){alert('No se pudo generar Word: '+e.message)}}
 </script>
 </body></html>
